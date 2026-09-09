@@ -1,0 +1,19 @@
+# Credentials - never commit
+.env
+
+# Run artifacts
+backups/
+logs/
+reports/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
