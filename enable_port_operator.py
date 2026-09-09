@@ -18,8 +18,12 @@ Process (each step shown with progress output):
      (full device JSON - restore with disable_port_operator.py).
   4. List port profiles (org network templates + device-level port_usages)
      and ask which profiles to unlock.
-  5. PUT {"port_config": {"<port>": {"no_local_overwrite": false}, ...}} to
-     each affected switch (device-level PUT - partial update semantics).
+  5. PUT {"port_config": {"<port>": {<the port's current config>,
+     "no_local_overwrite": false}, ...}} to each affected switch. Mist
+     overwrites each named port object on PUT rather than merging into it,
+     so the port's existing junos_port_config is resent with only
+     no_local_overwrite changed - otherwise usage/description/vlans/PoE/etc.
+     on that port would be dropped.
   6. GET each changed device back and verify the new value took effect.
   7. Print a summary and write a CSV report.
 
@@ -178,6 +182,10 @@ def build_plan(switches: list[dict],
         plan[str(sw.get("id"))] = {
             "device": sw,
             "ports": [p for p, _ in to_change],
+            # Full current junos_port_config for each port we will change, so
+            # the PUT can resend it intact (Mist overwrites the port object,
+            # it does not merge into it).
+            "port_configs": {p: dict(cfg) for p, cfg in to_change},
             "already_ok": already,
             "site_id": str(sw.get("__site_id")),
             "site_name": str(sw.get("__site_name") or sw.get("__site_id")),
@@ -245,6 +253,23 @@ def make_row(entry: dict, org_id: str, port: str, result: str, detail: str,
     }
 
 
+def build_port_payload(entry: dict) -> dict:
+    """Build the device PUT body for one planned switch.
+
+    Mist overwrites each named port object on PUT - it does not merge into
+    the existing one. So every targeted port's *current* junos_port_config
+    (captured in build_plan) is resent verbatim with only no_local_overwrite
+    flipped; otherwise usage, description, networks, PoE, STP, speed/duplex
+    and anything else on that port would be wiped by the write.
+    """
+    port_bodies: dict[str, dict] = {}
+    for port in entry["ports"]:
+        body = dict(entry.get("port_configs", {}).get(port) or {})
+        body["no_local_overwrite"] = TARGET_NO_LOCAL_OVERWRITE
+        port_bodies[port] = body
+    return {"port_config": port_bodies}
+
+
 def apply_changes(client: mc.MistClient, plan: dict[str, dict], org_id: str,
                   rows: list[dict], dry_run: bool) -> bool:
     """PUT the unlock payload to every planned device. Returns all_ok."""
@@ -253,13 +278,16 @@ def apply_changes(client: mc.MistClient, plan: dict[str, dict], org_id: str,
         dev = entry["device"]
         label = dev.get("name") or device_id
         site_id = entry["site_id"]
-        payload = {"port_config": {
-            port: {"no_local_overwrite": TARGET_NO_LOCAL_OVERWRITE}
-            for port in entry["ports"]
-        }}
+        payload = build_port_payload(entry)
+        bare = [p for p, b in payload["port_config"].items() if len(b) == 1]
+        if bare:
+            mc.warn(f"{label}: no existing config captured for "
+                    f"{', '.join(bare)} - writing no_local_overwrite only "
+                    "for those port(s).")
         if dry_run:
             mc.log(f"[{idx}/{len(plan)}] DRY-RUN {label}: would PUT "
-                   f"{len(entry['ports'])} port(s) -> no_local_overwrite=false")
+                   f"{len(entry['ports'])} port(s) -> no_local_overwrite=false "
+                   "(existing port config preserved)")
             for port in entry["ports"]:
                 rows.append(make_row(entry, org_id, port, "dry-run",
                                      "would unlock", TARGET_NO_LOCAL_OVERWRITE))
@@ -309,11 +337,21 @@ def verify_changes(client: mc.MistClient, plan: dict[str, dict], org_id: str,
             continue
         cfg = mc.get_port_config(fresh)
         for port in entry["ports"]:
-            value = cfg.get(port, {}).get("no_local_overwrite")
-            if value is False:
+            live = cfg.get(port) if isinstance(cfg.get(port), dict) else {}
+            value = live.get("no_local_overwrite")
+            # Every key we sent should still be on the port. A key that has
+            # gone missing means the PUT overwrote instead of merged.
+            expected = entry.get("port_configs", {}).get(port) or {}
+            dropped = sorted(k for k in expected if k not in live)
+            if value is False and not dropped:
                 verified += 1
                 mc.log(f"  [{idx}/{len(plan)}] {label} {port}: "
-                       "no_local_overwrite=False OK")
+                       "no_local_overwrite=False, port config intact OK")
+            elif value is False and dropped:
+                mc.warn(f"{label} {port}: no_local_overwrite is set but these "
+                        f"key(s) did not survive the PUT: {', '.join(dropped)}")
+                rows.append(make_row(entry, org_id, port, "verify_failed",
+                                     f"keys dropped on PUT: {dropped}", None))
             else:
                 mc.warn(f"{label} {port}: expected no_local_overwrite=False "
                         f"but found {value!r}")

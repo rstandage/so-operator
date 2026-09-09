@@ -52,7 +52,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NoReturn
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 DEFAULT_BASE_URL = "https://api.mist.com"
 DEFAULT_TIMEOUT = 30.0          # seconds per HTTP attempt

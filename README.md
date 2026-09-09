@@ -79,8 +79,13 @@ Process:
    (full device config, taken before any change).
 4. List port profiles (org network templates + device-level `port_usages`),
    prompt (or take `--profiles`), build the change plan.
-5. `PUT {"port_config": {port: {"no_local_overwrite": false}}}` per switch.
-6. GET each changed switch and verify the flag took effect.
+5. `PUT {"port_config": {port: {<port's current config>, "no_local_overwrite": false}}}`
+   per switch. Mist overwrites each named port object on PUT rather than
+   merging into it, so the port's existing config is resent with only the one
+   flag changed - otherwise `usage`, `description`, VLANs, PoE, STP, etc. on
+   that port would be dropped.
+6. GET each changed switch and verify the flag took effect **and** that every
+   resent key survived the write.
 7. Summary + CSV in `reports/`.
 
 ### Flags
@@ -130,8 +135,9 @@ script (`0`/`1`/`2`).
 
 * **Backups first.** The enable run captures the full config of every switch
   in scope before any change, so rollback is always possible.
-* **Surgical writes.** Only `port_config` entries are PUT - nothing else on the
-  device is touched unless you pass `--full-config`.
+* **Surgical writes.** Only the targeted ports' `port_config` entries are PUT,
+  and each is resent with its existing config plus the single flipped flag -
+  nothing else on the device, and no other port, is touched.
 * **Token safety.** The token is never printed, logged, or written to CSV.
 * **Rate limits.** Requests are paced; 429/5xx responses back off and retry,
   honouring `Retry-After` when present.
